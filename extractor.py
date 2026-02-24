@@ -9,7 +9,7 @@ from typing import Optional
 
 from cache import TTLCache
 from config import load_config
-from models import VideoFormat, VideoInfo, TranscriptSegment, TranscriptResult, AudioStreamInfo
+from models import VideoFormat, VideoInfo, TranscriptSegment, TranscriptResult, AudioStreamInfo, TranscriptionResult
 from platforms import Platform
 from validators import validate_url
 from transcript import parse_subtitles, segments_to_text
@@ -29,6 +29,10 @@ class GeoRestrictionError(ExtractionError):
 
 class VideoUnavailableError(ExtractionError):
     """Video is private or unavailable."""
+
+
+class TranscriptionError(ExtractionError):
+    """Whisper transcription failure."""
 
 
 def _map_error(msg: str) -> None:
@@ -435,6 +439,85 @@ def _select_best_audio(formats: list[dict], quality: str) -> dict:
 
     audio_fmts.sort(key=_sort_key)
     return audio_fmts[0]
+
+
+# ---------------------------------------------------------------------------
+# Whisper transcription
+# ---------------------------------------------------------------------------
+
+import os
+import tempfile
+
+
+def _sync_transcribe(url: str, platform: Platform, model_name: str) -> dict:
+    """Download audio and transcribe with Whisper (runs in thread pool)."""
+    import yt_dlp
+    import whisper
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".m4a", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    config_key = _PLATFORM_CONFIG_KEY.get(platform)
+    opts = {
+        **load_config(config_key),
+        "format": "bestaudio/best",
+        "outtmpl": tmp_path,
+        "skip_download": False,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": 30,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise TranscriptionError(f"No info returned for {url}")
+
+        model = whisper.load_model(model_name)
+        result = model.transcribe(tmp_path, task="transcribe")
+
+        return {
+            "video_id": info.get("id", ""),
+            "title": info.get("title", ""),
+            "language": result.get("language", ""),
+            "text": result.get("text", ""),
+            "model": model_name,
+        }
+    except yt_dlp.utils.DownloadError as exc:
+        _map_error(str(exc))
+    except Exception as exc:
+        raise TranscriptionError(str(exc)) from exc
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+async def transcribe_audio(url: str) -> TranscriptionResult:
+    """Async entry point: download audio and transcribe with Whisper."""
+    model_name = os.environ.get("STREAMLENS_WHISPER_MODEL", "base")
+
+    validation = validate_url(url)
+    canonical_url = validation.canonical_url
+    platform = validation.platform
+
+    cache_key = f"transcription:{canonical_url}:{model_name}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    data = await asyncio.to_thread(_sync_transcribe, canonical_url, platform, model_name)
+    result = TranscriptionResult(
+        video_id=data["video_id"],
+        title=data["title"],
+        language=data["language"],
+        text=data["text"],
+        model=data["model"],
+    )
+    _cache.set(cache_key, result)
+    return result
 
 
 async def extract_audio_url(url: str, quality: str = "best") -> AudioStreamInfo:

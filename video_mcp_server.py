@@ -11,10 +11,12 @@ from extractor import (
     ExtractionError,
     GeoRestrictionError,
     VideoUnavailableError,
+    TranscriptionError,
     ensure_ytdlp_installed,
     extract_video_info,
     extract_transcript,
     extract_audio_url,
+    transcribe_audio as _transcribe_audio,
 )
 from health import check_health
 from search import SearchError, search_videos as _search_videos
@@ -204,6 +206,38 @@ async def batch_get_info(urls: list[str]) -> str:
         return json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
     except BatchError as exc:
         return json.dumps({"error": "BatchError", "message": str(exc)})
+    except Exception as exc:
+        return json.dumps({"error": "UnexpectedError", "message": str(exc)})
+
+
+@mcp.tool()
+async def transcribe_audio(url: str) -> str:
+    """Transcribe audio from a video using OpenAI Whisper.
+
+    Works even when no subtitles are available.
+    Supports YouTube, TikTok, Douyin.
+    Language is auto-detected by Whisper.
+    Model is configurable via STREAMLENS_WHISPER_MODEL env var (default: base).
+
+    Args:
+        url: A valid video URL (YouTube, TikTok, or Douyin).
+
+    Returns:
+        JSON string with transcription text, detected language, and model used.
+    """
+    try:
+        result = await _transcribe_audio(url)
+        return json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
+    except InvalidURLError as exc:
+        return json.dumps({"error": "InvalidURL", "message": str(exc)})
+    except GeoRestrictionError as exc:
+        return json.dumps({"error": "GeoRestriction", "message": str(exc)})
+    except VideoUnavailableError as exc:
+        return json.dumps({"error": "VideoUnavailable", "message": str(exc)})
+    except TranscriptionError as exc:
+        return json.dumps({"error": "TranscriptionError", "message": str(exc)})
+    except ExtractionError as exc:
+        return json.dumps({"error": "ExtractionError", "message": str(exc)})
     except Exception as exc:
         return json.dumps({"error": "UnexpectedError", "message": str(exc)})
 

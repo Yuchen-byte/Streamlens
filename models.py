@@ -96,6 +96,20 @@ class TranscriptResult:
 
 
 @dataclass(frozen=True)
+class TranscriptionResult:
+    """Whisper audio transcription result."""
+
+    video_id: str
+    title: str
+    language: str
+    text: str
+    model: str
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+@dataclass(frozen=True)
 class AudioStreamInfo:
     """Audio stream URL and metadata."""
 

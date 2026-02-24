@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
     "yt-dlp>=2024.1.0",
+    "openai-whisper>=20231117",
 ]
 
 [project.optional-dependencies]
