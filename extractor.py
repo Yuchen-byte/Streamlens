@@ -8,7 +8,7 @@ import sys
 from typing import Optional
 
 from cache import TTLCache
-from config import load_config, load_ssh_config
+from config import load_config
 from models import VideoFormat, VideoInfo, TranscriptSegment, TranscriptResult, AudioStreamInfo
 from platforms import Platform
 from validators import validate_url
@@ -99,14 +99,6 @@ def _sync_extract(url: str, platform: Platform) -> dict:
     overrides = _PLATFORM_YDL_OVERRIDES.get(platform, {})
     config_key = _PLATFORM_CONFIG_KEY.get(platform)
     opts = {**_YDL_OPTS, **overrides, **load_config(config_key)}
-
-    ssh_host = load_ssh_config(config_key)
-    if ssh_host:
-        from ssh import ssh_extract, SSHError
-        try:
-            return ssh_extract(url, opts, ssh_host)
-        except SSHError as exc:
-            _map_error(str(exc))
 
     import yt_dlp
     try:
@@ -347,14 +339,6 @@ def _sync_extract_subtitles(url: str, platform: Platform, lang: str) -> dict:
         "subtitleslangs": [lang, f"{lang}-orig"],
         **load_config(config_key),
     }
-
-    ssh_host = load_ssh_config(config_key)
-    if ssh_host:
-        from ssh import ssh_extract_subtitles, SSHError
-        try:
-            return ssh_extract_subtitles(url, opts, ssh_host, lang)
-        except SSHError as exc:
-            _map_error(str(exc))
 
     import yt_dlp
     try:

@@ -176,17 +176,27 @@
 
 ## 安装与配置
 
-### 环境搭建
+### 1. 安装 uv（如未安装）
 
 ```bash
-conda env create -f environment.yml
-conda activate streamlens
-
-# 验证安装
-PYTHONNOUSERSITE=1 PYTHONPATH="" python -m pytest tests/ -v
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### MCP 注册（`~/.claude.json`）
+### 2. 安装 ffmpeg
+
+macOS：`brew install ffmpeg`
+Ubuntu/Debian：`sudo apt install ffmpeg`
+
+### 3. 安装依赖
+
+```bash
+cd /path/to/StreamLens
+uv sync
+```
+
+完成后依赖安装在 `.venv/`，无需手动激活。
+
+### 4. 注册 MCP（`~/.claude.json`）
 
 在 `mcpServers` 块中添加：
 
@@ -194,30 +204,47 @@ PYTHONNOUSERSITE=1 PYTHONPATH="" python -m pytest tests/ -v
 {
   "mcpServers": {
     "streamlens": {
-      "command": "/home/as/miniconda3/envs/streamlens/bin/python",
-      "args": ["/home/as/StreamLens/video_mcp_server.py"],
+      "command": "/path/to/StreamLens/.venv/bin/python",
+      "args": ["/path/to/StreamLens/video_mcp_server.py"],
       "env": {
         "PYTHONNOUSERSITE": "1",
         "PYTHONPATH": "",
         "STREAMLENS_PROXY": "http://127.0.0.1:7897",
         "STREAMLENS_COOKIE_SOURCE": "chrome",
         "STREAMLENS_COOKIE_FILE": "",
-        "STREAMLENS_SSH_HOST": "",
         "STREAMLENS_TIKTOK_PROXY": "",
         "STREAMLENS_TIKTOK_COOKIE_SOURCE": "",
         "STREAMLENS_TIKTOK_COOKIE_FILE": "",
-        "STREAMLENS_TIKTOK_SSH_HOST": "",
         "STREAMLENS_DOUYIN_PROXY": "",
         "STREAMLENS_DOUYIN_COOKIE_SOURCE": "",
-        "STREAMLENS_DOUYIN_COOKIE_FILE": "",
-        "STREAMLENS_DOUYIN_SSH_HOST": ""
+        "STREAMLENS_DOUYIN_COOKIE_FILE": ""
       }
     }
   }
 }
 ```
 
-配置完成后重启 Claude Code 即可使用。
+将 `/path/to/StreamLens` 替换为实际路径，重启 Claude Code 即可使用。
+
+### 验证安装
+
+```bash
+PYTHONNOUSERSITE=1 PYTHONPATH="" uv run pytest tests/ -v
+```
+
+---
+
+<details>
+<summary>备选：conda 环境</summary>
+
+```bash
+conda env create -f environment.yml
+conda activate streamlens
+```
+
+`command` 字段改为：`/home/yourname/miniconda3/envs/streamlens/bin/python`
+
+</details>
 
 ### 环境变量说明
 
@@ -228,7 +255,6 @@ PYTHONNOUSERSITE=1 PYTHONPATH="" python -m pytest tests/ -v
 | `STREAMLENS_PROXY` | 全局代理地址 | `http://127.0.0.1:7897` |
 | `STREAMLENS_COOKIE_SOURCE` | 从浏览器读取 cookie | `chrome` / `edge` / `firefox` |
 | `STREAMLENS_COOKIE_FILE` | Netscape 格式 cookies.txt 路径 | `/path/to/cookies.txt` |
-| `STREAMLENS_SSH_HOST` | SSH 远程执行主机 | `user@192.168.1.10` |
 
 #### TikTok 专用覆盖
 
@@ -237,7 +263,6 @@ PYTHONNOUSERSITE=1 PYTHONPATH="" python -m pytest tests/ -v
 | `STREAMLENS_TIKTOK_PROXY` | TikTok 专用代理 |
 | `STREAMLENS_TIKTOK_COOKIE_SOURCE` | TikTok 专用浏览器 cookie |
 | `STREAMLENS_TIKTOK_COOKIE_FILE` | TikTok 专用 cookies.txt |
-| `STREAMLENS_TIKTOK_SSH_HOST` | TikTok 专用 SSH 主机 |
 
 #### 抖音专用覆盖
 
@@ -246,7 +271,6 @@ PYTHONNOUSERSITE=1 PYTHONPATH="" python -m pytest tests/ -v
 | `STREAMLENS_DOUYIN_PROXY` | 抖音专用代理 |
 | `STREAMLENS_DOUYIN_COOKIE_SOURCE` | 抖音专用浏览器 cookie |
 | `STREAMLENS_DOUYIN_COOKIE_FILE` | 抖音专用 cookies.txt |
-| `STREAMLENS_DOUYIN_SSH_HOST` | 抖音专用 SSH 主机 |
 
 **优先级规则：**
 - 平台专用变量 > 全局变量
@@ -258,50 +282,8 @@ PYTHONNOUSERSITE=1 PYTHONPATH="" python -m pytest tests/ -v
 |------|---------|
 | 本机有 Chrome（macOS/Windows） | `STREAMLENS_COOKIE_SOURCE=chrome` |
 | Linux 服务器 + 代理直连 | `STREAMLENS_PROXY=http://127.0.0.1:7897` |
-| Linux 服务器 + Mac 的浏览器 cookie | `STREAMLENS_SSH_HOST=user@mac-ip`（见下方 SSH 章节） |
 | 手动导出 cookies.txt | `STREAMLENS_COOKIE_FILE=/path/to/cookies.txt` |
 | TikTok 需要单独代理 | `STREAMLENS_TIKTOK_PROXY=http://...` |
-
----
-
-## SSH 远程执行模式
-
-### 为什么需要 SSH 模式
-
-Linux 服务器通常没有图形界面浏览器，无法直接读取 cookie。SSH 模式让 StreamLens 在远程机器（如你的 Mac）上执行 yt-dlp，利用那台机器的浏览器 cookie，再将结果通过 SSH 管道传回。
-
-### 配置步骤
-
-**1. Mac 开启远程登录**
-
-系统设置 → 通用 → 共享 → 开启「远程登录」
-
-**2. 从 Linux 服务器配置免密登录**
-
-```bash
-# 在 Linux 服务器上生成密钥（如已有可跳过）
-ssh-keygen -t ed25519
-
-# 将公钥复制到 Mac
-ssh-copy-id user@mac-ip
-
-# 验证免密登录
-ssh user@mac-ip "yt-dlp --version"
-```
-
-**3. 设置环境变量**
-
-```json
-"STREAMLENS_SSH_HOST": "user@mac-ip"
-```
-
-**4. 验证**
-
-在 Claude Code 中调用 `health_check`，确认工具正常响应。
-
-### SSH 模式工作原理
-
-StreamLens 将 yt-dlp 命令序列化为 CLI 参数，通过 `ssh -o BatchMode=yes` 在远程主机执行，JSON 结果通过 stdout 管道传回本地解析。字幕提取时会在远程创建临时目录，提取完成后自动清理。
 
 ---
 
@@ -315,7 +297,6 @@ StreamLens 将 yt-dlp 命令序列化为 CLI 参数，通过 `ssh -o BatchMode=y
 | `ExtractionError` | yt-dlp 提取失败（网络超时等） | 检查网络连接或代理配置 |
 | `SearchError` | YouTube 搜索失败 | 检查网络或代理 |
 | `BatchError` | 批量/播放列表提取失败 | 检查 URL 格式，单个失败不影响其他 |
-| `SSHError` | SSH 连接或远程执行失败 | 验证免密登录、检查远程 yt-dlp 是否安装 |
 | `UnexpectedError` | 未预期异常 | 查看 message 字段获取详情 |
 
 ---
@@ -328,7 +309,6 @@ extractor.py          # yt-dlp 封装、异步桥接、格式筛选、缓存
 transcript.py         # 字幕提取与解析
 search.py             # YouTube 搜索
 batch.py              # 批量提取与播放列表
-ssh.py                # SSH 远程执行模式
 platforms.py          # 平台识别（YouTube / TikTok / 抖音）
 validators.py         # URL 校验与视频 ID 提取
 config.py             # 环境变量加载，支持平台专用覆盖
