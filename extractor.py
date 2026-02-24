@@ -8,9 +8,11 @@ import sys
 from typing import Optional
 
 from cache import TTLCache
-from config import load_config
-from models import VideoFormat, VideoInfo
-from validators import validate_youtube_url
+from config import load_config, load_ssh_config
+from models import VideoFormat, VideoInfo, TranscriptSegment, TranscriptResult, AudioStreamInfo
+from platforms import Platform
+from validators import validate_url
+from transcript import parse_subtitles, segments_to_text
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +29,19 @@ class GeoRestrictionError(ExtractionError):
 
 class VideoUnavailableError(ExtractionError):
     """Video is private or unavailable."""
+
+
+def _map_error(msg: str) -> None:
+    """Raise the appropriate ExtractionError subclass based on *msg*.
+
+    Always raises — never returns normally.
+    """
+    lower = msg.lower()
+    if "geo" in lower:
+        raise GeoRestrictionError(msg)
+    if "private" in lower or "unavailable" in lower:
+        raise VideoUnavailableError(msg)
+    raise ExtractionError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +67,7 @@ def ensure_ytdlp_installed() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Synchronous extraction
+# yt-dlp options: base + per-platform overrides
 # ---------------------------------------------------------------------------
 
 _YDL_OPTS = {
@@ -61,16 +76,39 @@ _YDL_OPTS = {
     "quiet": True,
     "no_warnings": True,
     "socket_timeout": 30,
-    "writeautomaticsub": True,
-    "subtitleslangs": ["en"],
+}
+
+_PLATFORM_YDL_OVERRIDES: dict[Platform, dict] = {
+    Platform.YOUTUBE: {
+        "writeautomaticsub": True,
+        "subtitleslangs": ["en"],
+    },
+    Platform.TIKTOK: {},
+    Platform.DOUYIN: {},
+}
+
+_PLATFORM_CONFIG_KEY: dict[Platform, Optional[str]] = {
+    Platform.YOUTUBE: None,
+    Platform.TIKTOK: "TIKTOK",
+    Platform.DOUYIN: "DOUYIN",
 }
 
 
-def _sync_extract(url: str) -> dict:
+def _sync_extract(url: str, platform: Platform) -> dict:
     """Run yt-dlp synchronously and return the info dict."""
-    import yt_dlp
+    overrides = _PLATFORM_YDL_OVERRIDES.get(platform, {})
+    config_key = _PLATFORM_CONFIG_KEY.get(platform)
+    opts = {**_YDL_OPTS, **overrides, **load_config(config_key)}
 
-    opts = {**_YDL_OPTS, **load_config()}
+    ssh_host = load_ssh_config(config_key)
+    if ssh_host:
+        from ssh import ssh_extract, SSHError
+        try:
+            return ssh_extract(url, opts, ssh_host)
+        except SSHError as exc:
+            _map_error(str(exc))
+
+    import yt_dlp
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -78,12 +116,7 @@ def _sync_extract(url: str) -> dict:
                 raise ExtractionError(f"No info returned for {url}")
             return info
     except yt_dlp.utils.DownloadError as exc:
-        msg = str(exc).lower()
-        if "geo" in msg:
-            raise GeoRestrictionError(str(exc)) from exc
-        if "private" in msg or "unavailable" in msg:
-            raise VideoUnavailableError(str(exc)) from exc
-        raise ExtractionError(str(exc)) from exc
+        _map_error(str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -135,14 +168,12 @@ def _select_formats(
     video_fmts = [f for f in formats if _has_video(f)]
     audio_only_fmts = [f for f in formats if _has_audio(f) and not _has_video(f)]
 
-    # best_quality_video: highest height
     best = None
     for f in video_fmts:
         h = f.get("height") or 0
         if best is None or h > (best.get("height") or 0):
             best = f
 
-    # smallest_video: lowest filesize, fallback to lowest tbr
     smallest = None
     for f in video_fmts:
         f_size = f.get("filesize") or f.get("tbr") or float("inf")
@@ -154,7 +185,6 @@ def _select_formats(
         if f_size < s_size:
             smallest = f
 
-    # audio_only: highest abr
     best_audio = None
     for f in audio_only_fmts:
         abr = f.get("abr") or f.get("tbr") or 0
@@ -173,22 +203,33 @@ def _select_formats(
     )
 
 
-def _extract_subtitle_summary(info: dict) -> Optional[str]:
-    """Extract first 2000 chars of auto-subtitles if available."""
-    auto_subs = info.get("automatic_captions") or {}
-    for lang in ("en", "en-orig"):
-        entries = auto_subs.get(lang, [])
-        for entry in entries:
-            data = entry.get("data") or entry.get("url")
-            if isinstance(data, str) and len(data) > 10:
-                return data[:2000]
-    # Fallback: check requested_subtitles
-    req_subs = info.get("requested_subtitles") or {}
-    for lang_data in req_subs.values():
-        if isinstance(lang_data, dict):
-            data = lang_data.get("data")
-            if isinstance(data, str) and len(data) > 10:
-                return data[:2000]
+def _extract_subtitle_summary(info: dict, platform: Platform) -> Optional[str]:
+    """Extract subtitle/content summary based on platform."""
+    if platform == Platform.YOUTUBE:
+        auto_subs = info.get("automatic_captions") or {}
+        for lang in ("en", "en-orig"):
+            entries = auto_subs.get(lang, [])
+            for entry in entries:
+                data = entry.get("data") or entry.get("url")
+                if isinstance(data, str) and len(data) > 10:
+                    return data[:2000]
+        req_subs = info.get("requested_subtitles") or {}
+        for lang_data in req_subs.values():
+            if isinstance(lang_data, dict):
+                data = lang_data.get("data")
+                if isinstance(data, str) and len(data) > 10:
+                    return data[:2000]
+        return None
+
+    # TikTok / Douyin: try tags first, then description
+    tags = info.get("tags")
+    if tags and isinstance(tags, list):
+        joined = ", ".join(str(t) for t in tags if t)
+        if len(joined) > 10:
+            return joined[:2000]
+    desc = info.get("description")
+    if isinstance(desc, str) and len(desc) > 10:
+        return desc[:2000]
     return None
 
 
@@ -203,7 +244,7 @@ def _format_duration(seconds: Optional[int]) -> Optional[str]:
     return f"{m}:{s:02d}"
 
 
-def _process_info_dict(info: dict) -> VideoInfo:
+def _process_info_dict(info: dict, platform: Platform) -> VideoInfo:
     """Transform raw yt-dlp info dict into an immutable VideoInfo."""
     formats = info.get("formats") or []
     best_quality, smallest, audio_only = _select_formats(formats)
@@ -213,6 +254,7 @@ def _process_info_dict(info: dict) -> VideoInfo:
         video_id=info.get("id", ""),
         title=info.get("title", ""),
         webpage_url=info.get("webpage_url", ""),
+        platform=platform.value,
         uploader=info.get("uploader"),
         uploader_url=info.get("uploader_url"),
         duration_seconds=int(duration) if duration else None,
@@ -220,11 +262,13 @@ def _process_info_dict(info: dict) -> VideoInfo:
         description=info.get("description"),
         thumbnail_url=info.get("thumbnail"),
         view_count=info.get("view_count"),
+        like_count=info.get("like_count"),
+        comment_count=info.get("comment_count"),
         upload_date=info.get("upload_date"),
         best_quality_video=best_quality,
         smallest_video=smallest,
         audio_only=audio_only,
-        subtitles_summary=_extract_subtitle_summary(info),
+        subtitles_summary=_extract_subtitle_summary(info, platform),
     )
 
 
@@ -235,13 +279,216 @@ def _process_info_dict(info: dict) -> VideoInfo:
 
 async def extract_video_info(url: str) -> VideoInfo:
     """Async entry point: validate, check cache, extract, cache result."""
-    canonical_url = validate_youtube_url(url)
+    validation = validate_url(url)
+    canonical_url = validation.canonical_url
+    platform = validation.platform
 
     cached = _cache.get(canonical_url)
     if cached is not None:
         return cached
 
-    info = await asyncio.to_thread(_sync_extract, canonical_url)
-    result = _process_info_dict(info)
+    info = await asyncio.to_thread(_sync_extract, canonical_url, platform)
+    result = _process_info_dict(info, platform)
     _cache.set(canonical_url, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Subtitle / transcript extraction
+# ---------------------------------------------------------------------------
+
+_SUBTITLE_YDL_OPTS = {
+    "skip_download": True,
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "socket_timeout": 30,
+    "writesubtitles": True,
+    "writeautomaticsub": True,
+}
+
+
+def _find_best_subtitle(info: dict, lang: str) -> tuple[str, str, bool]:
+    """Find the best subtitle data for the requested language.
+
+    Returns (subtitle_data, actual_lang, is_auto_generated).
+    Fallback chain: manual subs (exact lang) -> auto captions (exact lang)
+                    -> manual subs (any) -> auto captions (any)
+    Raises ExtractionError if no subtitles found.
+    """
+    manual_subs = info.get("subtitles") or {}
+    auto_subs = info.get("automatic_captions") or {}
+
+    # Try exact language match first
+    for source, is_auto in [(manual_subs, False), (auto_subs, True)]:
+        for key in (lang, f"{lang}-orig"):
+            entries = source.get(key, [])
+            for entry in entries:
+                data = entry.get("data")
+                if isinstance(data, str) and len(data) > 10:
+                    return data, key.split("-")[0], is_auto
+
+    # Fallback: first available language
+    for source, is_auto in [(manual_subs, False), (auto_subs, True)]:
+        for key, entries in source.items():
+            for entry in entries:
+                data = entry.get("data")
+                if isinstance(data, str) and len(data) > 10:
+                    return data, key.split("-")[0], is_auto
+
+    raise ExtractionError("No subtitles available for this video")
+
+
+def _sync_extract_subtitles(url: str, platform: Platform, lang: str) -> dict:
+    """Run yt-dlp to extract subtitle data."""
+    config_key = _PLATFORM_CONFIG_KEY.get(platform)
+    opts = {
+        **_SUBTITLE_YDL_OPTS,
+        "subtitleslangs": [lang, f"{lang}-orig"],
+        **load_config(config_key),
+    }
+
+    ssh_host = load_ssh_config(config_key)
+    if ssh_host:
+        from ssh import ssh_extract_subtitles, SSHError
+        try:
+            return ssh_extract_subtitles(url, opts, ssh_host, lang)
+        except SSHError as exc:
+            _map_error(str(exc))
+
+    import yt_dlp
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info is None:
+                raise ExtractionError(f"No info returned for {url}")
+            return info
+    except yt_dlp.utils.DownloadError as exc:
+        _map_error(str(exc))
+
+
+async def extract_transcript(
+    url: str, lang: str = "en", output_format: str = "text"
+) -> TranscriptResult:
+    """Async entry point: extract subtitles and return structured transcript.
+
+    Args:
+        url: Video URL.
+        lang: Preferred subtitle language (default "en").
+        output_format: "text" for plain text, "segments" for timestamped segments.
+
+    Returns:
+        TranscriptResult with parsed subtitle data.
+    """
+    validation = validate_url(url)
+    canonical_url = validation.canonical_url
+    platform = validation.platform
+    video_id = validation.video_id or ""
+
+    cache_key = f"transcript:{canonical_url}:{lang}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    info = await asyncio.to_thread(
+        _sync_extract_subtitles, canonical_url, platform, lang
+    )
+    raw_data, actual_lang, is_auto = _find_best_subtitle(info, lang)
+    segments = parse_subtitles(raw_data)
+    full_text = segments_to_text(segments)
+
+    result = TranscriptResult(
+        video_id=video_id,
+        language=actual_lang,
+        is_auto_generated=is_auto,
+        segments=tuple(
+            TranscriptSegment(start=s["start"], end=s["end"], text=s["text"])
+            for s in segments
+        ),
+        full_text=full_text,
+    )
+    _cache.set(cache_key, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Audio stream URL extraction
+# ---------------------------------------------------------------------------
+
+_EXT_PREFERENCE = ("m4a", "opus", "mp3", "ogg")
+
+
+def _select_best_audio(formats: list[dict], quality: str) -> dict:
+    """Select the best audio-only format based on quality preference.
+
+    Args:
+        formats: List of yt-dlp format dicts.
+        quality: "best" for highest bitrate, "smallest" for lowest filesize.
+
+    Returns:
+        The selected format dict.
+
+    Raises:
+        ExtractionError: If no audio-only formats are available.
+    """
+    audio_fmts = [
+        f for f in formats
+        if _has_audio(f) and not _has_video(f) and f.get("url")
+    ]
+    if not audio_fmts:
+        raise ExtractionError("No audio-only formats available for this video")
+
+    if quality == "smallest":
+        audio_fmts.sort(key=lambda f: f.get("filesize") or f.get("tbr") or float("inf"))
+        return audio_fmts[0]
+
+    # "best": sort by abr descending, prefer m4a/opus/mp3/ogg
+    def _sort_key(f: dict) -> tuple:
+        abr = f.get("abr") or f.get("tbr") or 0
+        ext = f.get("ext", "")
+        ext_rank = _EXT_PREFERENCE.index(ext) if ext in _EXT_PREFERENCE else len(_EXT_PREFERENCE)
+        return (-abr, ext_rank)
+
+    audio_fmts.sort(key=_sort_key)
+    return audio_fmts[0]
+
+
+async def extract_audio_url(url: str, quality: str = "best") -> AudioStreamInfo:
+    """Async entry point: extract the best audio stream URL.
+
+    Args:
+        url: Video URL.
+        quality: "best" for highest bitrate, "smallest" for lowest filesize.
+
+    Returns:
+        AudioStreamInfo with direct stream URL.
+    """
+    if quality not in ("best", "smallest"):
+        raise ExtractionError("quality must be 'best' or 'smallest'")
+
+    validation = validate_url(url)
+    canonical_url = validation.canonical_url
+    platform = validation.platform
+    video_id = validation.video_id or ""
+
+    cache_key = f"audio:{canonical_url}:{quality}"
+    cached = _cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    info = await asyncio.to_thread(_sync_extract, canonical_url, platform)
+    formats = info.get("formats") or []
+    best = _select_best_audio(formats, quality)
+
+    result = AudioStreamInfo(
+        video_id=video_id,
+        title=info.get("title", ""),
+        url=best["url"],
+        format_id=best.get("format_id", ""),
+        ext=best.get("ext", ""),
+        acodec=best.get("acodec"),
+        abr=best.get("abr"),
+        filesize=best.get("filesize"),
+    )
+    _cache.set(cache_key, result)
     return result

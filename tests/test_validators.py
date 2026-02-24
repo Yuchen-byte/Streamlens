@@ -1,58 +1,57 @@
-"""Tests for validators module."""
+"""Tests for validators module (thin delegation layer)."""
+
+from __future__ import annotations
 
 import pytest
 
-from validators import InvalidURLError, extract_video_id, validate_youtube_url
+from platforms import Platform
+from validators import InvalidURLError, validate_url
 
 
-class TestExtractVideoId:
-    """Test video ID extraction from various YouTube URL formats."""
+class TestValidateUrl:
 
-    @pytest.mark.parametrize("url,expected_id", [
-        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("https://youtu.be/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("https://www.youtube.com/shorts/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("https://www.youtube.com/embed/dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("https://m.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("http://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ"),
-        ("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=10s", "dQw4w9WgXcQ"),
-        ("  https://youtu.be/dQw4w9WgXcQ  ", "dQw4w9WgXcQ"),
-    ])
-    def test_valid_urls(self, url: str, expected_id: str) -> None:
-        assert extract_video_id(url) == expected_id
+    def test_youtube_returns_canonical(self) -> None:
+        result = validate_url("https://youtu.be/dQw4w9WgXcQ")
+        assert result.platform == Platform.YOUTUBE
+        assert result.canonical_url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        assert result.video_id == "dQw4w9WgXcQ"
 
-    @pytest.mark.parametrize("url", [
-        "https://www.google.com",
-        "not a url",
-        "",
-        "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf",
-        "https://www.youtube.com/watch?v=short",
-    ])
-    def test_invalid_urls(self, url: str) -> None:
-        with pytest.raises(InvalidURLError):
-            extract_video_id(url)
+    def test_tiktok_full_url(self) -> None:
+        result = validate_url("https://www.tiktok.com/@user/video/7234567890123456789")
+        assert result.platform == Platform.TIKTOK
+        assert result.video_id == "7234567890123456789"
 
+    def test_tiktok_short_url(self) -> None:
+        result = validate_url("https://vm.tiktok.com/ZMrABC123")
+        assert result.platform == Platform.TIKTOK
+        assert result.video_id is None
 
-class TestValidateYoutubeUrl:
-    """Test URL validation and canonicalization."""
+    def test_douyin_full_url(self) -> None:
+        result = validate_url("https://www.douyin.com/video/7234567890123456789")
+        assert result.platform == Platform.DOUYIN
+        assert result.video_id == "7234567890123456789"
 
-    def test_returns_canonical_url(self) -> None:
-        result = validate_youtube_url("https://youtu.be/dQw4w9WgXcQ")
-        assert result == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    def test_douyin_short_url(self) -> None:
+        result = validate_url("https://v.douyin.com/iRNBho5p")
+        assert result.platform == Platform.DOUYIN
+        assert result.video_id is None
 
     def test_empty_string_raises(self) -> None:
         with pytest.raises(InvalidURLError):
-            validate_youtube_url("")
+            validate_url("")
 
     def test_whitespace_only_raises(self) -> None:
         with pytest.raises(InvalidURLError):
-            validate_youtube_url("   ")
+            validate_url("   ")
 
     def test_none_raises(self) -> None:
         with pytest.raises(InvalidURLError):
-            validate_youtube_url(None)  # type: ignore[arg-type]
+            validate_url(None)  # type: ignore[arg-type]
 
     def test_non_string_raises(self) -> None:
         with pytest.raises(InvalidURLError):
-            validate_youtube_url(12345)  # type: ignore[arg-type]
+            validate_url(12345)  # type: ignore[arg-type]
+
+    def test_invalid_url_raises(self) -> None:
+        with pytest.raises(InvalidURLError):
+            validate_url("https://www.google.com")
